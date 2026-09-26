@@ -1,0 +1,53 @@
+platform:
+  name: GlassMelt
+  project_id: line-control-py
+  storage_root: var/state
+limits:
+  furnace:
+    level_target_mm: 1120.0
+    level_band_mm: 35.0
+    melt_temp_target_c: 1425.0
+    melt_temp_min_c: 1380.0
+    melt_temp_max_c: 1470.0
+    draft_target_pa: -18.0
+  burner:
+    air_min_flow_m3_h: 5200.0
+    gas_max_m3_h: 620.0
+    ignition_timeout_s: 6.0
+    zone_count: 6
+    flame_min_temp_c: 660.0
+  forehearth:
+    stable_band_c: 6.0
+    stable_hold_s: 8.0
+    gate_min_temp_c: 1180.0
+    gate_open_pct: 100.0
+  temp:
+    anneal_alarm_c: 585.0
+    anneal_clear_c: 575.0
+    anneal_target_c: 560.0
+    soak_seconds: 900.0
+  feeder:
+    gob_mass_target_g: 186.0
+    gob_mass_tolerance_g: 4.0
+    cut_window_ms: 240.0
+    recover_gob_mass_g: 172.0
+  mold:
+    close_min_force_kn: 42.0
+    blow_pressure_kpa: 320.0
+    blow_min_ms: 180.0
+    reopen_delay_s: 4.0
+  lehr:
+    belt_speed_m_per_min: 8.4
+    belt_slow_m_per_min: 4.2
+    heater_min_pct: 18.0
+    heater_max_pct: 92.0
+    anneal_zone_count: 5
+  batch:
+    charge_batch_kg: 640.0
+    scale_offset_max_kg: 12.0
+    mix_tolerance_pct: 1.5
+    charge_window_s: 180.0
+pages:
+  - overview
+  - operations
+  - records

@@ -1,0 +1,28 @@
+[project]
+name = "glassmelt-control-platform"
+version = "1.0.0"
+description = "process line controller"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools]
+packages = [
+    "glassmelt",
+    "glassmelt.ns",
+    "glassmelt.store",
+    "glassmelt.audit",
+    "glassmelt.batch",
+    "glassmelt.furnace",
+    "glassmelt.burner",
+    "glassmelt.forehearth",
+    "glassmelt.temp",
+    "glassmelt.feeder",
+    "glassmelt.mold",
+    "glassmelt.lehr",
+    "glassmelt.console",
+]
