@@ -295,6 +295,158 @@ class LehrLimits:
 
 
 @dataclass(frozen=True)
+class OxygenTrimLimits:
+    """烟气含氧量空燃比修正约束。
+
+    修正回路在固定空燃比（理论配比 × 基准过剩空气系数）上缓慢叠加一个有界
+    修正系数：系数有界、每拍变化率有界，测点不可信或工况不适合闭环时退回
+    固定配比。这里的每个取值都是燃烧安全边界，装配阶段必须全部校验，不
+    允许带半份阈值投运。
+    """
+
+    ratio_air_per_gas: float
+    excess_air_base: float
+    trim_min: float
+    trim_max: float
+    trim_safe: float
+    o2_target_pct: float
+    o2_deadband_pct: float
+    o2_low_load_target_bias_pct: float
+    o2_min_load: float
+    o2_valid_min_pct: float
+    o2_valid_max_pct: float
+    o2_slew_pct_per_s: float
+    o2_freeze_noise_pct: float
+    o2_freeze_hold_s: float
+    filter_tau_s: float
+    integral_per_min: float
+    slew_up_pct_per_min: float
+    slew_down_pct_per_min: float
+    hold_enter_s: float
+    fixed_after_s: float
+    recover_require_s: float
+    plausibility_tolerance_pct: float
+    cross_limiter_bias_pct: float
+    air_min_operating_m3_h: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "OxygenTrimLimits":
+        values = {
+            "ratio_air_per_gas": _number(section, "ratio_air_per_gas", minimum=0.1),
+            "excess_air_base": _number(section, "excess_air_base", minimum=1.0),
+            "trim_min": _number(section, "trim_min", minimum=0.5),
+            "trim_max": _number(section, "trim_max", minimum=0.5),
+            "trim_safe": _number(section, "trim_safe", minimum=0.5),
+            "o2_target_pct": _number(section, "o2_target_pct", minimum=0.0),
+            "o2_deadband_pct": _number(section, "o2_deadband_pct", minimum=0.0),
+            "o2_low_load_target_bias_pct": _number(
+                section, "o2_low_load_target_bias_pct", minimum=0.0
+            ),
+            "o2_min_load": _number(section, "o2_min_load", minimum=0.0),
+            "o2_valid_min_pct": _number(section, "o2_valid_min_pct", minimum=0.0),
+            "o2_valid_max_pct": _number(section, "o2_valid_max_pct", minimum=0.0),
+            "o2_slew_pct_per_s": _number(section, "o2_slew_pct_per_s", minimum=0.0),
+            "o2_freeze_noise_pct": _number(
+                section, "o2_freeze_noise_pct", minimum=0.0
+            ),
+            "o2_freeze_hold_s": _number(section, "o2_freeze_hold_s", minimum=0.1),
+            "filter_tau_s": _number(section, "filter_tau_s", minimum=0.0),
+            "integral_per_min": _number(section, "integral_per_min", minimum=0.0),
+            "slew_up_pct_per_min": _number(
+                section, "slew_up_pct_per_min", minimum=0.0
+            ),
+            "slew_down_pct_per_min": _number(
+                section, "slew_down_pct_per_min", minimum=0.0
+            ),
+            "hold_enter_s": _number(section, "hold_enter_s", minimum=0.0),
+            "fixed_after_s": _number(section, "fixed_after_s", minimum=0.0),
+            "recover_require_s": _number(section, "recover_require_s", minimum=0.1),
+            "plausibility_tolerance_pct": _number(
+                section, "plausibility_tolerance_pct", minimum=0.0
+            ),
+            "cross_limiter_bias_pct": _number(
+                section, "cross_limiter_bias_pct", minimum=0.0
+            ),
+            "air_min_operating_m3_h": _number(
+                section, "air_min_operating_m3_h", minimum=0.0
+            ),
+        }
+        limits = cls(**values)
+        if limits.excess_air_base <= 1.0:
+            raise ConfigError(
+                "基准过剩空气系数必须大于 1（固定配比本身要走贫燃）",
+                component="config",
+            )
+        if not limits.trim_min < 1.0 < limits.trim_max:
+            raise ConfigError(
+                "修正系数必须满足 下限 < 1.0 < 上限", component="config"
+            )
+        if not (
+            limits.trim_min <= limits.trim_safe <= limits.trim_max
+            and limits.trim_safe >= 1.0
+        ):
+            raise ConfigError(
+                "退回用安全修正系数必须落在 [下限, 上限] 内且不小于 1",
+                component="config",
+            )
+        if not limits.o2_valid_min_pct < limits.o2_target_pct < limits.o2_valid_max_pct:
+            raise ConfigError("含氧量目标必须落在有效量程内", component="config")
+        if limits.o2_deadband_pct <= 0:
+            raise ConfigError("含氧量死区必须为正", component="config")
+        if not limits.hold_enter_s < limits.fixed_after_s:
+            raise ConfigError(
+                "冻结确认时间必须短于转固定配比时间", component="config"
+            )
+        if limits.integral_per_min <= 0:
+            raise ConfigError("积分速率必须为正", component="config")
+        if min(limits.slew_up_pct_per_min, limits.slew_down_pct_per_min) <= 0:
+            raise ConfigError("加风与减风两个方向的修正速率必须为正", component="config")
+        # 目标含氧量必须落在修正系数行程可达的残氧范围内，否则闭环永远
+        # 顶在边界上，越烧越偏。
+        reachable = (
+            limits.o2_at_ratio(limits.ratio_at(limits.trim_min)),
+            limits.o2_at_ratio(limits.ratio_at(limits.trim_max)),
+        )
+        if not reachable[0] < limits.o2_target_pct < reachable[1]:
+            raise ConfigError(
+                "含氧量目标必须落在修正行程可达范围内 "
+                f"({reachable[0]:.2f} ~ {reachable[1]:.2f})",
+                component="config",
+            )
+        return limits
+
+    def ratio_at(self, trim: float) -> float:
+        """给定修正系数下的有效空燃体积比。"""
+
+        return self.ratio_air_per_gas * self.excess_air_base * float(trim)
+
+    def safe_ratio(self) -> float:
+        """测点不可信时退回的固定空燃比（即今天的固定配比）。"""
+
+        return self.ratio_at(self.trim_safe)
+
+    def o2_at_ratio(self, ratio: float) -> float:
+        """按简化物性估算给定空燃比对应的干基残氧（%）。"""
+
+        excess = max(0.0, float(ratio) - self.ratio_air_per_gas)
+        return 20.9 * excess / (float(ratio) + 1.0)
+
+    def target_at_load(self, load_fraction: float) -> float:
+        """低负荷时目标含氧量整体抬高，避免低温段缺氧冒黑烟。"""
+
+        load = max(0.0, min(1.0, float(load_fraction)))
+        if load >= self.o2_min_load:
+            return self.o2_target_pct
+        return self.o2_target_pct + self.o2_low_load_target_bias_pct
+
+    def in_deadband(self, o2_pct: float, load_fraction: float) -> bool:
+        """实测含氧量是否落在目标死区内（死区内不动作）。"""
+
+        target = self.target_at_load(load_fraction)
+        return abs(float(o2_pct) - target) <= self.o2_deadband_pct
+
+
+@dataclass(frozen=True)
 class BatchLimits:
     """投料与配比约束。"""
 
@@ -341,6 +493,7 @@ class PlatformConfig:
     mold: MoldLimits
     lehr: LehrLimits
     batch: BatchLimits
+    oxygen: OxygenTrimLimits
     pages: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -376,6 +529,7 @@ class PlatformConfig:
             mold=MoldLimits.from_mapping(_section(limits, "mold")),
             lehr=LehrLimits.from_mapping(_section(limits, "lehr")),
             batch=BatchLimits.from_mapping(_section(limits, "batch")),
+            oxygen=OxygenTrimLimits.from_mapping(_section(limits, "oxygen")),
             pages=tuple(pages),
         )
 
@@ -451,6 +605,39 @@ def default_config() -> PlatformConfig:
             mix_tolerance_pct=1.5,
             charge_window_s=180.0,
         ),
+        oxygen=OxygenTrimLimits(
+            # 理论空燃比 10.0；固定配比按基准过剩空气系数 1.15 运行，
+            # 对应残氧约 2.5%，修正回路再围绕它微调。
+            ratio_air_per_gas=10.0,
+            excess_air_base=1.15,
+            # 修正系数只允许在 ±8% 内收，退回时回到 1.00（即固定配比）。
+            trim_min=0.92,
+            trim_max=1.08,
+            trim_safe=1.00,
+            o2_target_pct=3.0,
+            o2_deadband_pct=0.3,
+            o2_low_load_target_bias_pct=0.8,
+            o2_min_load=0.4,
+            o2_valid_min_pct=0.5,
+            o2_valid_max_pct=12.0,
+            # 单拍变化超过 1.0%/s 视为毛刺；一阶滤波时间常数 8 秒。
+            o2_slew_pct_per_s=1.0,
+            o2_freeze_noise_pct=0.05,
+            o2_freeze_hold_s=30.0,
+            filter_tau_s=8.0,
+            # 慢收敛：每 1% 含氧偏差每分钟最多积 0.5% 修正量；
+            # 加风（缺氧）方向每分钟最多 2%，减风方向最多 1%。
+            integral_per_min=0.5,
+            slew_up_pct_per_min=2.0,
+            slew_down_pct_per_min=1.0,
+            # 测点异常 20 秒先冻结；90 秒不恢复转固定配比并提示。
+            hold_enter_s=20.0,
+            fixed_after_s=90.0,
+            recover_require_s=60.0,
+            plausibility_tolerance_pct=1.5,
+            cross_limiter_bias_pct=1.0,
+            air_min_operating_m3_h=2000.0,
+        ),
         pages=("overview", "operations", "records"),
     )
 
@@ -516,6 +703,32 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "scale_offset_max_kg": cfg.batch.scale_offset_max_kg,
                 "mix_tolerance_pct": cfg.batch.mix_tolerance_pct,
                 "charge_window_s": cfg.batch.charge_window_s,
+            },
+            "oxygen": {
+                "ratio_air_per_gas": cfg.oxygen.ratio_air_per_gas,
+                "excess_air_base": cfg.oxygen.excess_air_base,
+                "trim_min": cfg.oxygen.trim_min,
+                "trim_max": cfg.oxygen.trim_max,
+                "trim_safe": cfg.oxygen.trim_safe,
+                "o2_target_pct": cfg.oxygen.o2_target_pct,
+                "o2_deadband_pct": cfg.oxygen.o2_deadband_pct,
+                "o2_low_load_target_bias_pct": cfg.oxygen.o2_low_load_target_bias_pct,
+                "o2_min_load": cfg.oxygen.o2_min_load,
+                "o2_valid_min_pct": cfg.oxygen.o2_valid_min_pct,
+                "o2_valid_max_pct": cfg.oxygen.o2_valid_max_pct,
+                "o2_slew_pct_per_s": cfg.oxygen.o2_slew_pct_per_s,
+                "o2_freeze_noise_pct": cfg.oxygen.o2_freeze_noise_pct,
+                "o2_freeze_hold_s": cfg.oxygen.o2_freeze_hold_s,
+                "filter_tau_s": cfg.oxygen.filter_tau_s,
+                "integral_per_min": cfg.oxygen.integral_per_min,
+                "slew_up_pct_per_min": cfg.oxygen.slew_up_pct_per_min,
+                "slew_down_pct_per_min": cfg.oxygen.slew_down_pct_per_min,
+                "hold_enter_s": cfg.oxygen.hold_enter_s,
+                "fixed_after_s": cfg.oxygen.fixed_after_s,
+                "recover_require_s": cfg.oxygen.recover_require_s,
+                "plausibility_tolerance_pct": cfg.oxygen.plausibility_tolerance_pct,
+                "cross_limiter_bias_pct": cfg.oxygen.cross_limiter_bias_pct,
+                "air_min_operating_m3_h": cfg.oxygen.air_min_operating_m3_h,
             },
         },
         "pages": list(cfg.pages),

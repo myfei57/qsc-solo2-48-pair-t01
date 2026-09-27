@@ -57,6 +57,19 @@ class GasValve:
         )
         return flow
 
+    def throttle(self, flow_m3_h: float, air_state) -> float:
+        """运行中按配比需求调整燃气流量；风路必须仍在运行。"""
+
+        if getattr(air_state, "flow_m3_h", 0.0) <= 0.0:
+            raise InterlockError("助燃风已关闭，禁止调节燃气", component="furnace")
+        with self._lock:
+            if not self._open:
+                raise InterlockError("燃气阀未开启，禁止调节流量", component="furnace")
+            self._flow_m3_h = self._max * max(
+                0.0, min(1.0, float(flow_m3_h) / self._max)
+            )
+            return self._flow_m3_h
+
     def close(self) -> float:
         """关阀，返回关阀前的流量。"""
 

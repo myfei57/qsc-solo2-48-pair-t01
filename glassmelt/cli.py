@@ -98,6 +98,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     restored = platform.start_charging(path="resume")
     anneal_excursion = platform.evaluate_anneal(592.0)
     lehr_reset = platform.reset_lehr("演示用退火复位")
+    o2_calibration = platform.calibrate_o2_probe("演示用分析仪标定")
+    trim_fallback = platform.fallback_oxygen_trim("演示用人工退回")
     shutdown = platform.stop()
 
     server = ConsoleServer(platform)
@@ -119,6 +121,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "charged_after_clear": restored,
         "anneal_excursion": anneal_excursion,
         "lehr_reset": lehr_reset,
+        "o2_calibration": o2_calibration,
+        "trim_fallback": trim_fallback,
         "shutdown": shutdown,
         "probe": probe,
         "audit": platform.audit.summary(),

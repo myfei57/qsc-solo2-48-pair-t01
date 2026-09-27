@@ -83,6 +83,18 @@ class CombustionAir:
         )
         return self.state()
 
+    def regulate(self, flow_m3_h: float) -> AirState:
+        """运行中按配比需求调整风量；风路未建立时不允许调节。"""
+
+        target = max(0.0, float(flow_m3_h))
+        if target <= 0.0:
+            raise ValueError("调节风量必须为正，关风必须走 close()")
+        with self._lock:
+            if self._flow_m3_h <= 0.0:
+                raise ValueError("助燃风未建立，禁止调节风量")
+            self._flow_m3_h = target
+        return self.state()
+
     def close(self) -> AirState:
         """关助燃风（点火失败的吹扫前也要先关风）。"""
 

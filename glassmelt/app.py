@@ -17,8 +17,11 @@ from .audit.record import AuditRecord
 from .batch.charge import Charger
 from .batch.scale import BatchScale
 from .burner.air import CombustionAir
+from .burner.crosslimit import CrossLimiter
 from .burner.draft import air_closed_before_draft_stop, close_combustion_air
 from .burner.ignite import IgnitionUnit
+from .burner.o2probe import OxygenProbe
+from .burner.trim import OxygenTrim
 from .burner.zone import ZoneMap
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
@@ -52,6 +55,9 @@ from .temp.trip import TripInterlock
 from .telemetry import TrendBuffer
 
 DEFAULT_UNIT = "tank1"
+
+#: 仿真用表计固定偏差（%O2）：修正回路要收掉的正是这种慢漂移。
+_O2_SENSOR_BIAS_PCT = 1.0
 
 #: 启动顺序的硬约束：(先发生的步骤, 必须后发生的步骤, 说明)
 START_ORDER_RULES: tuple[tuple[str, str, str], ...] = (
@@ -146,6 +152,11 @@ class Platform:
         self.air = CombustionAir(self.clock, self.bus, self.config.burner)
         self.igniter = IgnitionUnit(self.bus, self.air, self.gas, self.config.burner)
         self.zones = ZoneMap(self.bus, self.config.burner)
+        self.o2probe = OxygenProbe(self.clock, self.bus, self.config.oxygen)
+        self.oxygen_trim = OxygenTrim(self.clock, self.bus, self.config.oxygen)
+        self.cross_limiter = CrossLimiter(
+            self.bus, self.config.oxygen, self.config.burner.gas_max_m3_h
+        )
 
         self.scale = BatchScale(self.bus, store, self.config.batch)
         self.charger = Charger(self.bus, self.config.batch)
@@ -190,6 +201,7 @@ class Platform:
             ("burner", "air", "combustion-air-fan"),
             ("burner", "gas", "gas-control-valve"),
             ("burner", "zone", "zone-burner"),
+            ("burner", "o2_probe", "flue-o2-analyzer"),
             ("forehearth", "steady", "forehearth-heater"),
             ("forehearth", "gate", "forehearth-gate"),
             ("temp", "anneal", "anneal-thermocouple"),
@@ -242,6 +254,9 @@ class Platform:
                 ignition = self.igniter.ignite(self.furnace_temp.target_c + 20.0)
             self.furnace_temp.observe(self.furnace_temp.target_c + 12.0)
             self._note(steps, "ignite", phase=ignition["phase"])
+
+            # 点火成功、火焰稳定后才投入含氧量修正回路。
+            self.oxygen_trim.enable()
 
             if not self.scale.restore():
                 self.scale.recalibrate(0.0, self.clock.now())
@@ -298,6 +313,7 @@ class Platform:
             steps = self._shutdown_steps
             self.gate.close("停炉")
             self._note(steps, "gate_close")
+            self.oxygen_trim.disable("停炉")
             shutdown = close_combustion_air(self.air, self.draft, self.bus)
             for step in shutdown["steps"]:
                 steps.append("air_close" if step == "combustion_air_close" else "draft_stop")
@@ -322,6 +338,8 @@ class Platform:
             if not self.igniter.is_burning():
                 self.igniter.reignite(melt_c + 30.0, "窑温回落")
             self.furnace_temp.observe(melt_c)
+
+            combustion = self._run_combustion(state)
 
             self.level.drift(-7.0 * state.pull_rate - 1.0 * state.dt)
             charge_kg = 0.0
@@ -351,12 +369,16 @@ class Platform:
             self.trend.append("gob_mass_g", moment, gob.mass_g)
             self.trend.append("belt_speed", moment, anneal["belt"]["speed_m_per_min"])
             self.trend.append("heater_power_pct", moment, anneal["heater"]["power_pct"])
+            self.trend.append("flue_o2_pct", moment, combustion["o2_pct"])
+            self.trend.append("air_gas_ratio", moment, combustion["demand"]["ratio"])
+            self.trend.append("trim_coefficient", moment, combustion["trim"]["trim"])
 
             return {
                 "cycle": self._cycles,
                 "dt": state.dt,
                 "load": round(state.load, 4),
                 "melt_temp_c": round(self.furnace_temp.temperature_c, 3),
+                "combustion": combustion,
                 "level": self.level.snapshot(),
                 "charge": {
                     "charged_kg": round(charge_kg, 3),
@@ -371,6 +393,40 @@ class Platform:
                 "anneal": anneal,
                 "zones": self.zones.snapshot(),
             }
+
+    def _run_combustion(self, state: CycleInputs) -> dict:
+        """结算一拍燃烧：评估含氧量 → 修正配比 → 交叉限幅 → 下发空燃需求。"""
+
+        air_flow = self.air.flow_m3_h
+        gas_flow = self.gas.flow_m3_h
+        actual_o2 = self._simulated_flue_o2(air_flow, gas_flow)
+        reading = self.o2probe.evaluate(
+            actual_o2, state.dt, air_flow_m3_h=air_flow, gas_flow_m3_h=gas_flow
+        )
+        trim = self.oxygen_trim.step(reading, state.load, state.dt)
+        gas_demand = state.load * self.config.burner.gas_max_m3_h
+        demand = self.cross_limiter.demands(gas_demand, air_flow, gas_flow, trim.trim)
+        self.air.regulate(demand.air_m3_h)
+        self.gas.throttle(demand.gas_m3_h, self.air.state())
+        return {
+            "o2_pct": round(actual_o2, 4),
+            "reading": reading.as_dict(),
+            "trim": trim.as_dict(),
+            "demand": demand.as_dict(),
+            "air_flow_m3_h": round(self.air.flow_m3_h, 2),
+            "gas_flow_m3_h": round(self.gas.flow_m3_h, 2),
+        }
+
+    def _simulated_flue_o2(self, air_flow_m3_h: float, gas_flow_m3_h: float) -> float:
+        """推算本拍实际残氧：由真实空燃流量决定，叠加表计偏差与负荷扰动。"""
+
+        if gas_flow_m3_h <= 1.0:
+            return 20.9
+        ratio = air_flow_m3_h / gas_flow_m3_h
+        true_o2 = self.config.oxygen.o2_at_ratio(ratio)
+        # 负荷相关的慢扰动模拟燃气热值波动与漏风，幅度小于表计偏差。
+        load_ripple = 0.15 * ((self._cycles % 7) - 3) / 3.0
+        return max(0.0, true_o2 + _O2_SENSOR_BIAS_PCT + load_ripple)
 
     def evaluate_anneal(self, temperature_c: float) -> dict:
         """按退火温度结算告警、闩锁、网带、加热器与段温。"""
@@ -431,6 +487,23 @@ class Platform:
     def release_ignition_latch(self) -> dict:
         with self._lock:
             return self.igniter.release_latch(self.config.burner.air_min_flow_m3_h * 0.9)
+
+    def fallback_oxygen_trim(self, reason: str = "人工退回固定配比") -> dict:
+        """人工把空燃比退回固定配比（与测点超时退回同一条路径）。"""
+
+        with self._lock:
+            previous = self.oxygen_trim.force_fixed(reason)
+            return {
+                "previous_mode": previous.value,
+                "trim": self.oxygen_trim.snapshot(),
+            }
+
+    def calibrate_o2_probe(self, reason: str = "分析仪标定") -> dict:
+        """标定／反吹期间作废本拍含氧读数，修正回路按测点不可信处理。"""
+
+        with self._lock:
+            reading = self.o2probe.invalidate(reason)
+            return reading.as_dict()
 
     def open_forehearth_gate(self, path: str = "warm_up") -> dict:
         """按给定路径开闸板：初次升温走 warm_up，再升温走 reheat。"""
@@ -674,6 +747,11 @@ class Platform:
             "gas": self.gas.snapshot(),
             "air": self.air.snapshot(),
             "ignition": self.igniter.snapshot(),
+            "oxygen": {
+                "probe": self.o2probe.snapshot(),
+                "trim": self.oxygen_trim.snapshot(),
+                "cross_limiter": self.cross_limiter.snapshot(),
+            },
             "zones": self.zones.snapshot(),
             "trip": self.trip.snapshot(),
             "scale": self.scale.snapshot(),
@@ -728,6 +806,7 @@ def build_platform(
             mold=effective.mold,
             lehr=effective.lehr,
             batch=effective.batch,
+            oxygen=effective.oxygen,
             pages=effective.pages,
         )
     return Platform(config=effective, clock=clock, unit=unit)

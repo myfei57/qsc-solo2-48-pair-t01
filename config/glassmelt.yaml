@@ -47,6 +47,32 @@ limits:
     scale_offset_max_kg: 12.0
     mix_tolerance_pct: 1.5
     charge_window_s: 180.0
+  oxygen:
+    # 理论空燃比；固定配比 = 理论值 × 基准过剩空气系数（贫燃运行）。
+    ratio_air_per_gas: 10.0
+    excess_air_base: 1.15
+    trim_min: 0.92
+    trim_max: 1.08
+    trim_safe: 1.00
+    o2_target_pct: 3.0
+    o2_deadband_pct: 0.3
+    o2_low_load_target_bias_pct: 0.8
+    o2_min_load: 0.4
+    o2_valid_min_pct: 0.5
+    o2_valid_max_pct: 12.0
+    o2_slew_pct_per_s: 1.0
+    o2_freeze_noise_pct: 0.05
+    o2_freeze_hold_s: 30.0
+    filter_tau_s: 8.0
+    integral_per_min: 0.5
+    slew_up_pct_per_min: 2.0
+    slew_down_pct_per_min: 1.0
+    hold_enter_s: 20.0
+    fixed_after_s: 90.0
+    recover_require_s: 60.0
+    plausibility_tolerance_pct: 1.5
+    cross_limiter_bias_pct: 1.0
+    air_min_operating_m3_h: 2000.0
 pages:
   - overview
   - operations
