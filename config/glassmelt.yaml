@@ -16,6 +16,18 @@ limits:
     ignition_timeout_s: 6.0
     zone_count: 6
     flame_min_temp_c: 660.0
+  o2trim:
+    o2_setpoint_pct: 3.0
+    o2_min_plausible_pct: 0.2
+    o2_max_plausible_pct: 16.0
+    ratio_base: 11.3
+    ratio_min_safe: 9.9
+    trim_max_pct: 8.0
+    trim_rate_per_s: 0.001
+    sensor_stale_after_s: 15.0
+    sensor_freeze_samples: 6
+    sensor_freeze_eps_pct: 0.02
+    fallback_grace_s: 20.0
   forehearth:
     stable_band_c: 6.0
     stable_hold_s: 8.0

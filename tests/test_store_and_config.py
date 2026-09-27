@@ -99,6 +99,7 @@ def test_load_config_matches_defaults():
     assert loaded.pages == default.pages
     assert loaded.furnace == default.furnace
     assert loaded.burner == default.burner
+    assert loaded.o2trim == default.o2trim
     assert loaded.feeder == default.feeder
     assert loaded.lehr == default.lehr
     assert loaded.temp == default.temp

@@ -19,6 +19,7 @@ from .batch.scale import BatchScale
 from .burner.air import CombustionAir
 from .burner.draft import air_closed_before_draft_stop, close_combustion_air
 from .burner.ignite import IgnitionUnit
+from .burner.o2trim import O2TrimController
 from .burner.zone import ZoneMap
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
@@ -106,6 +107,8 @@ class CycleInputs:
     pull_rate: float
     gob_mass_g: float
     dt: float
+    o2_sensor_pct: float | None = None
+    o2_bias_pct: float = 0.0
 
     def clamped(self) -> "CycleInputs":
         return CycleInputs(
@@ -113,6 +116,12 @@ class CycleInputs:
             pull_rate=max(0.0, min(2.0, float(self.pull_rate))),
             gob_mass_g=max(1.0, float(self.gob_mass_g)),
             dt=max(0.001, float(self.dt)),
+            o2_sensor_pct=(
+                None
+                if self.o2_sensor_pct is None
+                else max(-1.0, min(25.0, float(self.o2_sensor_pct)))
+            ),
+            o2_bias_pct=max(-5.0, min(5.0, float(self.o2_bias_pct))),
         )
 
 
@@ -146,6 +155,12 @@ class Platform:
         self.air = CombustionAir(self.clock, self.bus, self.config.burner)
         self.igniter = IgnitionUnit(self.bus, self.air, self.gas, self.config.burner)
         self.zones = ZoneMap(self.bus, self.config.burner)
+        self.o2trim = O2TrimController(
+            self.clock,
+            self.bus,
+            self.config.o2trim,
+            self.config.burner.air_min_flow_m3_h,
+        )
 
         self.scale = BatchScale(self.bus, store, self.config.batch)
         self.charger = Charger(self.bus, self.config.batch)
@@ -172,6 +187,7 @@ class Platform:
 
         self._cycles = 0
         self._elapsed_s = 0.0
+        self._o2_dither = 1.0
         self._started = False
         self._startup_steps: list[str] = []
         self._shutdown_steps: list[str] = []
@@ -243,6 +259,9 @@ class Platform:
             self.furnace_temp.observe(self.furnace_temp.target_c + 12.0)
             self._note(steps, "ignite", phase=ignition["phase"])
 
+            if self.igniter.is_burning():
+                self.o2trim.enable(at=self._elapsed_s)
+
             if not self.scale.restore():
                 self.scale.recalibrate(0.0, self.clock.now())
             self.scale.require_durable()
@@ -298,6 +317,7 @@ class Platform:
             steps = self._shutdown_steps
             self.gate.close("停炉")
             self._note(steps, "gate_close")
+            self.o2trim.disable("停炉")
             shutdown = close_combustion_air(self.air, self.draft, self.bus)
             for step in shutdown["steps"]:
                 steps.append("air_close" if step == "combustion_air_close" else "draft_stop")
@@ -322,6 +342,31 @@ class Platform:
             if not self.igniter.is_burning():
                 self.igniter.reignite(melt_c + 30.0, "窑温回落")
             self.furnace_temp.observe(melt_c)
+
+            o2_trim = None
+            if self.igniter.is_burning():
+                if not self.o2trim.is_enabled():
+                    self.o2trim.enable(at=self._elapsed_s)
+                gas_flow = self.gas.adjust(
+                    self.config.burner.gas_max_m3_h * (0.55 + 0.45 * state.load)
+                )
+                o2_true = (
+                    self._flue_o2_pct(self.air.flow_m3_h, gas_flow) + state.o2_bias_pct
+                )
+                if state.o2_sensor_pct is None:
+                    # 健康测点：真实烟气加上现场固有的微小波动；一条绝对平的
+                    # 含氧量曲线只可能是变送器卡死，测点监督据此判"冻结"。
+                    self._o2_dither = -self._o2_dither
+                    measured_o2 = o2_true + 0.06 * self._o2_dither
+                else:
+                    measured_o2 = state.o2_sensor_pct
+                self.o2trim.observe(measured_o2, at=self._elapsed_s)
+                o2_trim = self.o2trim.update(gas_flow, state.dt, at=self._elapsed_s)
+                self.air.adjust(o2_trim.air_setpoint_m3_h)
+                self.trend.append("flue_o2_pct", moment, o2_true)
+                self.trend.append("air_fuel_ratio", moment, o2_trim.ratio)
+            elif self.o2trim.is_enabled():
+                self.o2trim.disable("燃烧中断")
 
             self.level.drift(-7.0 * state.pull_rate - 1.0 * state.dt)
             charge_kg = 0.0
@@ -363,6 +408,7 @@ class Platform:
                     "total_kg": round(self.charger.charged_kg, 3),
                 },
                 "mix": plan.as_dict(),
+                "o2_trim": None if o2_trim is None else o2_trim.as_dict(),
                 "stability": stability.as_dict(),
                 "gate": self.gate.snapshot(),
                 "gob": gob.as_dict(),
@@ -398,6 +444,21 @@ class Platform:
 
         overshoot = (self.heater.power_pct - 50.0) * 0.5
         return self.anneal.mean_c() + overshoot + float(load) * 4.0
+
+    @staticmethod
+    def _flue_o2_pct(air_flow_m3_h: float, gas_flow_m3_h: float) -> float:
+        """按空气/燃气流量推算烟气含氧量（天然气湿基近似）。
+
+        每单位燃气完全燃烧需 9.52 单位空气；λ 为过剩空气系数，
+        湿基含氧量 ≈ 200·(λ−1)/(1+9.52·λ)。富燃时烟气里基本没有游离氧。
+        """
+
+        if gas_flow_m3_h <= 0:
+            return 20.9
+        lam = max(0.0, float(air_flow_m3_h)) / (float(gas_flow_m3_h) * 9.52)
+        if lam <= 1.0:
+            return 0.0
+        return 200.0 * (lam - 1.0) / (1.0 + 9.52 * lam)
 
     def start_charging(self, path: str = "start") -> dict:
         """按给定路径投料：正常启动走 start，联锁恢复走 resume。"""
@@ -632,6 +693,7 @@ class Platform:
                 "/api/batch/start",
                 "/api/burner/ignite",
                 "/api/burner/trip",
+                "/api/burner/o2trim",
                 "/api/forehearth/gate",
                 "/api/mold/blow",
                 "/api/lehr/reset",
@@ -674,6 +736,7 @@ class Platform:
             "gas": self.gas.snapshot(),
             "air": self.air.snapshot(),
             "ignition": self.igniter.snapshot(),
+            "o2trim": self.o2trim.snapshot(),
             "zones": self.zones.snapshot(),
             "trip": self.trip.snapshot(),
             "scale": self.scale.snapshot(),
@@ -722,6 +785,7 @@ def build_platform(
             storage_root=os.path.abspath(storage_root),
             furnace=effective.furnace,
             burner=effective.burner,
+            o2trim=effective.o2trim,
             forehearth=effective.forehearth,
             temp=effective.temp,
             feeder=effective.feeder,

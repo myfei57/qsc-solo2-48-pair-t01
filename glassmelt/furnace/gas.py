@@ -57,6 +57,28 @@ class GasValve:
         )
         return flow
 
+    def adjust(self, flow_m3_h: float) -> float:
+        """燃烧中调整燃气流量；阀门未开时拒绝，返回实际流量。"""
+
+        if not self.is_open:
+            raise InterlockError("燃气阀未开启，禁止调整燃气流量", component="furnace")
+        target = max(0.0, min(self._max, float(flow_m3_h)))
+        if target <= 0:
+            raise ValueError("燃烧中燃气流量必须为正")
+        with self._lock:
+            self._flow_m3_h = target
+            flow = self._flow_m3_h
+        self._bus.publish(
+            Event.of(
+                "furnace",
+                "furnace",
+                "gas_adjusted",
+                subject="gas_valve",
+                flow_m3_h=round(flow, 2),
+            )
+        )
+        return flow
+
     def close(self) -> float:
         """关阀，返回关阀前的流量。"""
 

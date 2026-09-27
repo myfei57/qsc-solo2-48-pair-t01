@@ -132,6 +132,55 @@ class BurnerLimits:
 
 
 @dataclass(frozen=True)
+class O2TrimLimits:
+    """烟气含氧量校正空燃配比的约束。"""
+
+    o2_setpoint_pct: float
+    o2_min_plausible_pct: float
+    o2_max_plausible_pct: float
+    ratio_base: float
+    ratio_min_safe: float
+    trim_max_pct: float
+    trim_rate_per_s: float
+    sensor_stale_after_s: float
+    sensor_freeze_samples: int
+    sensor_freeze_eps_pct: float
+    fallback_grace_s: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "O2TrimLimits":
+        limits = cls(
+            o2_setpoint_pct=_number(section, "o2_setpoint_pct", minimum=0.0),
+            o2_min_plausible_pct=_number(section, "o2_min_plausible_pct", minimum=0.0),
+            o2_max_plausible_pct=_number(section, "o2_max_plausible_pct"),
+            ratio_base=_number(section, "ratio_base", minimum=0.0),
+            ratio_min_safe=_number(section, "ratio_min_safe", minimum=0.0),
+            trim_max_pct=_number(section, "trim_max_pct", minimum=0.0),
+            trim_rate_per_s=_number(section, "trim_rate_per_s", minimum=0.0),
+            sensor_stale_after_s=_number(section, "sensor_stale_after_s", minimum=0.0),
+            sensor_freeze_samples=int(_number(section, "sensor_freeze_samples", minimum=3.0)),
+            sensor_freeze_eps_pct=_number(section, "sensor_freeze_eps_pct", minimum=0.0),
+            fallback_grace_s=_number(section, "fallback_grace_s", minimum=0.0),
+        )
+        if not limits.o2_min_plausible_pct < limits.o2_setpoint_pct < limits.o2_max_plausible_pct:
+            raise ConfigError("含氧量目标必须落在测点可信区间内", component="config")
+        if not limits.ratio_min_safe < limits.ratio_base:
+            raise ConfigError("安全配比下限必须小于固定配比", component="config")
+        if limits.trim_max_pct <= 0 or limits.trim_max_pct > 25.0:
+            raise ConfigError("配比修正幅度上限必须在 (0, 25] 内", component="config")
+        if limits.trim_rate_per_s <= 0:
+            raise ConfigError("配比修正速率必须为正", component="config")
+        if limits.sensor_stale_after_s <= 0:
+            raise ConfigError("测点失效判定时长必须为正", component="config")
+        return limits
+
+    def o2_plausible(self, o2_pct: float) -> bool:
+        """含氧量读数是否落在可信区间内。"""
+
+        return self.o2_min_plausible_pct <= float(o2_pct) <= self.o2_max_plausible_pct
+
+
+@dataclass(frozen=True)
 class ForehearthLimits:
     """供料道稳温与闸板约束。"""
 
@@ -335,6 +384,7 @@ class PlatformConfig:
     storage_root: str
     furnace: FurnaceLimits
     burner: BurnerLimits
+    o2trim: O2TrimLimits
     forehearth: ForehearthLimits
     temp: TempLimits
     feeder: FeederLimits
@@ -370,6 +420,7 @@ class PlatformConfig:
             storage_root=storage_root,
             furnace=FurnaceLimits.from_mapping(_section(limits, "furnace")),
             burner=BurnerLimits.from_mapping(_section(limits, "burner")),
+            o2trim=O2TrimLimits.from_mapping(_section(limits, "o2trim")),
             forehearth=ForehearthLimits.from_mapping(_section(limits, "forehearth")),
             temp=TempLimits.from_mapping(_section(limits, "temp")),
             feeder=FeederLimits.from_mapping(_section(limits, "feeder")),
@@ -413,6 +464,19 @@ def default_config() -> PlatformConfig:
             ignition_timeout_s=6.0,
             zone_count=6,
             flame_min_temp_c=660.0,
+        ),
+        o2trim=O2TrimLimits(
+            o2_setpoint_pct=3.0,
+            o2_min_plausible_pct=0.2,
+            o2_max_plausible_pct=16.0,
+            ratio_base=11.3,
+            ratio_min_safe=9.9,
+            trim_max_pct=8.0,
+            trim_rate_per_s=0.001,
+            sensor_stale_after_s=15.0,
+            sensor_freeze_samples=6,
+            sensor_freeze_eps_pct=0.02,
+            fallback_grace_s=20.0,
         ),
         forehearth=ForehearthLimits(
             stable_band_c=6.0,
@@ -479,6 +543,19 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "ignition_timeout_s": cfg.burner.ignition_timeout_s,
                 "zone_count": cfg.burner.zone_count,
                 "flame_min_temp_c": cfg.burner.flame_min_temp_c,
+            },
+            "o2trim": {
+                "o2_setpoint_pct": cfg.o2trim.o2_setpoint_pct,
+                "o2_min_plausible_pct": cfg.o2trim.o2_min_plausible_pct,
+                "o2_max_plausible_pct": cfg.o2trim.o2_max_plausible_pct,
+                "ratio_base": cfg.o2trim.ratio_base,
+                "ratio_min_safe": cfg.o2trim.ratio_min_safe,
+                "trim_max_pct": cfg.o2trim.trim_max_pct,
+                "trim_rate_per_s": cfg.o2trim.trim_rate_per_s,
+                "sensor_stale_after_s": cfg.o2trim.sensor_stale_after_s,
+                "sensor_freeze_samples": cfg.o2trim.sensor_freeze_samples,
+                "sensor_freeze_eps_pct": cfg.o2trim.sensor_freeze_eps_pct,
+                "fallback_grace_s": cfg.o2trim.fallback_grace_s,
             },
             "forehearth": {
                 "stable_band_c": cfg.forehearth.stable_band_c,

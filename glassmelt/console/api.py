@@ -74,6 +74,11 @@ class ConsoleAPI:
 
         return self.platform.readiness_report()
 
+    def o2trim(self) -> dict:
+        """氧量校正回路：模式、修正量、测点可信度与回退计数。"""
+
+        return self.platform.o2trim.snapshot()
+
     def start_batch(self, payload: dict) -> dict:
         path = str(payload.get("path", "start"))
         return self._guard(lambda: self.platform.start_charging(path=path))

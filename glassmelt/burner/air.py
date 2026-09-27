@@ -83,6 +83,26 @@ class CombustionAir:
         )
         return self.state()
 
+    def adjust(self, flow_m3_h: float) -> AirState:
+        """燃烧中调整风量；低于点火下限直接拒绝（要停风只能走关风流程）。"""
+
+        target = float(flow_m3_h)
+        if not self._limits.air_ok(target):
+            raise ValueError(f"燃烧中风量 {target:.0f} m3/h 不得低于点火下限")
+        with self._lock:
+            self._flow_m3_h = target
+        self._bus.publish(
+            Event.of(
+                "burner",
+                "burner",
+                "air_adjusted",
+                subject="combustion_air",
+                flow_m3_h=round(target, 2),
+                epoch=self.epoch,
+            )
+        )
+        return self.state()
+
     def close(self) -> AirState:
         """关助燃风（点火失败的吹扫前也要先关风）。"""
 
